@@ -79,14 +79,15 @@ class PhpUnSerChain(BasePluginClass):
 
     def main(self):
 
-        self.get_destruct()
+        for magic in ['__destruct', '__toString', '__wakeup', '__invoke']:
+            self._scan_magic_entry(magic)
         # self.get_any_methodcall("YvGvAn", (), isnew=True)
 
-    def get_destruct(self):
+    def _scan_magic_entry(self, magic_name):
 
-        destruct_nodes = self.dataflow_db.objects.filter(node_type='newMethod', source_node__startswith='Method-__destruct')
+        nodes = self.dataflow_db.objects.filter(node_type='newMethod', source_node__startswith='Method-{}'.format(magic_name))
 
-        for node in destruct_nodes:
+        for node in nodes:
 
             unserchain = [node]
             class_locate = node.node_locate
@@ -95,19 +96,20 @@ class PhpUnSerChain(BasePluginClass):
 
             method_nodes = self.dataflow_db.objects.filter(node_locate__startswith=new_locate)
 
-            # for mnode in method_nodes:
-            #     print
-            logger.info("[PhpUnSerChain] New Chain Start in __destruct in {}".format(node.node_locate))
+            logger.info("[PhpUnSerChain] New Chain Start in {} in {}".format(magic_name, node.node_locate))
             status = self.deep_search_chain(method_nodes, class_locate, unserchain)
 
             if status:
-                logger.info("[PhpUnSerChain] New Source __destruct{} in {}".format(node.sink_node, node.node_locate))
+                logger.info("[PhpUnSerChain] New Source {}{} in {}".format(magic_name, node.sink_node, node.node_locate))
 
                 for unsernode in unserchain:
-                    logger.info("{}".format(unsernode.node_locate.ljust(100,' ')))
-                    logger_console.warn("{}   {}{}".format(unsernode.node_type.ljust(30,' '), unsernode.source_node,
+                    logger.info("{}".format(unsernode.node_locate.ljust(100, ' ')))
+                    logger_console.warn("{}   {}{}".format(unsernode.node_type.ljust(30, ' '), unsernode.source_node,
                                                            self.deep_get_node_name(unsernode.sink_node)))
                 logger.info("[PhpUnSerChain] UnSerChain is available.")
+
+    def get_destruct(self):
+        self._scan_magic_entry('__destruct')
 
     def get___get(self, var_name, unserchain=[], define_param=(), deepth=0):
         """
@@ -409,9 +411,13 @@ class PhpUnSerChain(BasePluginClass):
         :return:
         """
         self.danger_function = {'call_user_func': [0],
-                                'call_user_func_array': [0, 1],
+                                'call_user_func_array': [0],
                                 'eval': [0],
                                 'system': [0],
+                                'shell_exec': [0],
+                                'passthru': [0],
+                                'exec': [0],
+                                'assert': [0],
                                 'file_put_contents': [0, 1],
                                 'create_function': [0, 1],
                                 }
@@ -422,7 +428,10 @@ class PhpUnSerChain(BasePluginClass):
                                 }
 
         if node.node_type == 'FunctionCall' and node.source_node in self.danger_function:
-            sink_node = ast.literal_eval(node.sink_node) if node.sink_node.startswith('(') else (node.sink_node)
+            try:
+                sink_node = ast.literal_eval(node.sink_node) if node.sink_node.startswith('(') else (node.sink_node)
+            except (ValueError, SyntaxError):
+                return False
 
             if len(sink_node) >= len(self.danger_function[node.source_node]):
 
@@ -469,6 +478,10 @@ class PhpUnSerChain(BasePluginClass):
                 address_id = address[1:]
 
                 chlid_node = self.dataflow_db.objects.filter(id=address_id).first()
+
+                if chlid_node is None:
+                    node = node.replace(address, '')
+                    continue
 
                 final_name = ""
 
@@ -571,12 +584,13 @@ class PhpUnSerChain(BasePluginClass):
                 # 暂时简单的认为这样可控
                 return True
             elif param_name.startswith('Array-'):
-                arraylist = ast.literal_eval(param_name[6:])
-
-                for key in arraylist:
-                    if key.startswith('Variable-$this'):
-                        return True
-
+                try:
+                    arraylist = ast.literal_eval(param_name[6:])
+                    for key in arraylist:
+                        if key.startswith('Variable-$this'):
+                            return True
+                except (ValueError, SyntaxError):
+                    pass
                 return False
         # 回溯变量
         now_id = now_node.id
@@ -604,9 +618,13 @@ class PhpUnSerChain(BasePluginClass):
                                                      node_type='Foreach').order_by('-id')
 
         for back_node in back_nodes:
-            if param_name == ast.literal_eval(back_node.sink_node)[-1]:
+            try:
+                sink_list = ast.literal_eval(back_node.sink_node)
+            except (ValueError, SyntaxError):
+                continue
+            if param_name == sink_list[-1]:
                 # 找到参数赋值
-                new_param_name = self.deep_get_node_name(ast.literal_eval(back_node.sink_node)[0])
+                new_param_name = self.deep_get_node_name(sink_list[0])
 
                 # 递归继续
                 return self.check_param_controllable(new_param_name, back_node)
@@ -853,7 +871,10 @@ class PhpUnSerChain(BasePluginClass):
         deepth += 1
 
         if nc:
-            now_class_extend_classs = ast.literal_eval(nc.sink_node)
+            try:
+                now_class_extend_classs = ast.literal_eval(nc.sink_node)
+            except (ValueError, SyntaxError):
+                now_class_extend_classs = []
             if len(now_class_extend_classs) > 0:
                 # len > 0代表当前类存在原型类，所以向上寻找类的方法
 
@@ -901,7 +922,10 @@ class PhpUnSerChain(BasePluginClass):
         nc2s = self.dataflow_db.objects.filter(node_type='newClass', sink_node__contains=now_class_name)
 
         for nc2 in nc2s:
-            now_class_extend_classs = ast.literal_eval(nc2.sink_node)
+            try:
+                now_class_extend_classs = ast.literal_eval(nc2.sink_node)
+            except (ValueError, SyntaxError):
+                continue
             if len(now_class_extend_classs) > 0 and now_class_name in now_class_extend_classs:
                 child_class = self.deep_get_node_name(nc2.source_node)
                 new_child_class_name = child_class

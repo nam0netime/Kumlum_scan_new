@@ -118,7 +118,14 @@ class Pretreatment:
                     try:
                         if not self.is_unprecom:
                             parser = make_parser()
-                            all_nodes = parser.parse(code_content, debug=False, lexer=lexer.clone(), tracking=True)
+                            try:
+                                all_nodes = parser.parse(code_content, debug=False, lexer=lexer.clone(), tracking=True)
+                            except SyntaxError:
+                                # Retry after normalizing PHP 7+/8+ syntax
+                                from core.php_normalizer import normalize
+                                normalized = normalize(code_content)
+                                all_nodes = parser.parse(normalized, debug=False, lexer=lexer.clone(), tracking=True)
+                                logger.info('[AST] [NORMALIZED] re-parsed {} after syntax normalization'.format(filepath))
                         else:
                             all_nodes = []
 
